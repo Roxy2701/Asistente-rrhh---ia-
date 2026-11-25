@@ -2,7 +2,7 @@
 
 Proyecto Final · AI Automation · Coderhouse
 
-> **BORRADOR.** Los valores marcados con `[COMPLETAR]` y los números del ROI son estimaciones para ajustar. Las capturas se agregan al final.
+> Los valores del ROI son **estimaciones** basadas en el volumen típico de consultas del área.
 
 ---
 
@@ -14,16 +14,16 @@ En el área de Recursos Humanos de una empresa de retail con empleados en varias
 
 El asistente atiende esas consultas con un AI Agent que busca la respuesta en la **Guía de consultas frecuentes de RRHH** (RAG). Si la información no está en la guía, o si el caso es personal (un reclamo del recibo, un embargo, un adelanto), el agente **no inventa**: deriva la consulta a una persona de RRHH.
 
-### ROI estimado (valores de ejemplo, a ajustar)
+### ROI estimado
 
 | Variable | Estimación |
 |---|---|
-| Consultas repetidas por mes | 150 `[COMPLETAR]` |
-| Tiempo por consulta (leer, buscar, responder) | 6 minutos `[COMPLETAR]` |
+| Consultas repetidas por mes | 150 |
+| Tiempo por consulta (leer, buscar, responder) | 6 minutos |
 | Tiempo manual total | 150 × 6 min = **15 horas por mes** |
 | Porcentaje que el asistente resuelve solo | 70 % (el resto se deriva) |
 | **Tiempo ahorrado** | 15 h × 70 % = **10,5 horas por mes** |
-| Costo de implementación (una sola vez) | ~16 horas de armado `[COMPLETAR]` |
+| Costo de implementación (una sola vez) | ~16 horas de armado |
 | Costo mensual de herramientas | **$0**: n8n local, Ollama local y Supabase en plan gratuito |
 
 **Recuperación de la inversión:** 16 h de armado ÷ 10,5 h ahorradas por mes ≈ **1,5 meses**.
@@ -58,7 +58,7 @@ Las consultas son repetitivas y la respuesta ya existe por escrito. Si el volume
 
 - **Vector Store: Supabase (pgvector).** Es persistente (los datos sobreviven a un reinicio de n8n), tiene plan gratuito y permite búsqueda por similitud con una tabla y una función SQL (`match_documents`).
 - **Embeddings: `nomic-embed-text` con Ollama.** Es local, por lo que el contenido de la guía no se envía a un tercero para indexarlo. Genera vectores de 768 dimensiones, el mismo tamaño que tiene la tabla.
-- **Partición del documento:** fragmentos de `[COMPLETAR]` caracteres con solapamiento de `[COMPLETAR]`, para que cada pregunta y su respuesta queden juntas.
+- **Partición del documento:** fragmentos de 500 caracteres con solapamiento de 50 (Recursive Character Text Splitter), para que cada pregunta y su respuesta queden juntas. La guía de ejemplo genera 9 fragmentos.
 
 ---
 
@@ -71,43 +71,71 @@ Las consultas son repetitivas y la respuesta ya existe por escrito. Si el volume
 
 ## 4. Workflow en n8n
 
-El workflow tiene **dos disparadores** en el mismo canvas.
+El workflow principal («Asistente RRHH RAG») tiene **dos disparadores** en el mismo canvas, más un segundo workflow («Manejo de errores RRHH») que se activa solo cuando el principal falla.
 
 **Flujo A: Ingesta (se corre cuando cambia la guía)**
 
 | Nodo | Para qué está |
 |---|---|
-| Form Trigger «Carga de guía» | Entrada 1: recibe el PDF de la guía |
-| Default Data Loader + Text Splitter | Extrae el texto y lo parte en fragmentos |
-| Embeddings Ollama (`nomic-embed-text`) | Convierte cada fragmento en un vector |
+| Form Trigger «Carga de guía RRHH» | Entrada 1: recibe el PDF de la guía |
+| Default Data Loader + Recursive Character Text Splitter (500 / 50) | Extrae el texto y lo parte en fragmentos |
+| Embeddings Ollama (`nomic-embed-text`) | Convierte cada fragmento en un vector de 768 dimensiones |
 | Supabase Vector Store (Insert) | Guarda fragmentos y vectores en la tabla `documents` |
 
 **Flujo B: Consulta del empleado**
 
 | Nodo | Para qué está |
 |---|---|
-| Webhook «Consulta del empleado» | Entrada 2: recibe el mensaje (simula el chat) |
+| Webhook «Consulta del empleado» | Entrada 2: recibe el mensaje. Simula un chat de Telegram (`message.chat.id` y `message.text`) |
 | Edit Fields «extraer remitente y texto» | Deja solo `from` (número del remitente) y `mensaje` |
-| Supabase Vector Store (Get Many) | Recupera los fragmentos más parecidos a la pregunta |
-| Code / Aggregate «Armar contexto» | Junta los fragmentos en un solo texto |
-| AI Agent + Ollama Chat Model + Simple Memory | Decide RESPONDER o DERIVAR; la memoria usa `from` como Session ID |
-| If «Respuesta válida» | Control de errores: detecta respuesta vacía o sin formato |
-| Switch «Decisión» | Separa RESPONDER de DERIVAR |
-| Respond to Webhook | Salida: devuelve la respuesta (o el aviso de derivación) |
+| Supabase Vector Store1 (Get Many, límite 3) | Recupera los 3 fragmentos más parecidos a la pregunta (función `match_documents`) |
+| Code «Armar contexto» | Junta los fragmentos en un solo texto y conserva `from` y `mensaje` |
+| AI Agent «Agente RRHH» + Ollama Chat Model (Qwen3 4B) + Simple Memory | Decide RESPONDER o DERIVAR y redacta la respuesta |
+| Code «Validar respuesta» | Limpia el texto del modelo (quita `<think>` y marcas de código), lo convierte en JSON y verifica `accion` y `respuesta` |
+| If «¿Respuesta Válida?» | Control de errores: si el JSON es válido, sigue por el camino normal; si no, por el de respaldo |
+| Respond to Webhook «Responder al empleado» | Salida: devuelve `valido`, `accion`, `respuesta` y `to` |
+| Respond to Webhook «Responder (respaldo)» | Salida alternativa: mensaje fijo que deriva a RRHH |
 
 ### Session ID de la memoria
 
-El número del remitente llega en el mensaje (`message.chat.id`). El nodo Edit Fields lo guarda como `from`, y Simple Memory lo toma así: `{{ $('extraer remitente y texto').item.json.from }}`. Cada número tiene su propia conversación, y la memoria de un empleado no se mezcla con la de otro.
+El número del remitente llega en el mensaje (`message.chat.id`). El nodo Edit Fields lo guarda como `from`, y Simple Memory lo usa como Session ID con la expresión `{{ $('Armar contexto').item.json.from }}`. Cada número tiene su propia conversación: en las pruebas, los ids `5491100000005` y `5491100000006` quedaron con memorias separadas.
+
+Configuración real del nodo Simple Memory, tomada del workflow exportado:
+
+```json
+{
+  "sessionIdType": "customKey",
+  "sessionKey": "={{ $('Armar contexto').item.json.from }}",
+  "contextWindowLength": 4
+}
+```
+
+Con `customKey` el Session ID es el número del remitente, y la ventana de contexto recuerda los últimos 4 intercambios de cada conversación.
+
+**Limitación:** Simple Memory guarda la conversación en la memoria de n8n, por lo que se pierde al reiniciar. Para producción se reemplazaría por una memoria persistente (Postgres o Redis).
+
+### Decisión del modelo y limitaciones observadas
+
+Qwen3 es un modelo que "piensa" antes de responder, así que el prompt termina con `/no_think` y el nodo «Validar respuesta» elimina cualquier bloque `<think>`. El modelo de 4B a veces comete errores menores de redacción (por ejemplo, falta alguna tilde); esto no afecta la decisión ni el contenido, y se acepta como límite del modelo local.
 
 ---
 
 ## 5. Manejo de errores y casos límite
 
-1. **La Vector Store falla, tarda o no devuelve contexto.** El nodo de recuperación está configurado para continuar ante un error, y un If revisa si hay contexto. Si no lo hay, el flujo responde con un mensaje de respaldo y **deriva a una persona de RRHH**, sin pasar por el agente.
-2. **El LLM devuelve una respuesta vacía o con formato inválido.** El nodo If «Respuesta válida» verifica que el JSON tenga `accion` y `respuesta`. Si no, deriva la consulta en lugar de enviar un texto roto.
-3. **El agente interpreta mal una instrucción (control en el prompt).** El system prompt limita al agente a responder solo con el contexto, prohíbe aprobar trámites y trata el mensaje del empleado como un dato, no como una instrucción.
+**Implementados y probados:**
 
-`[COMPLETAR: capturas de los caminos de error]`
+1. **Falla de la Vector Store (y, en general, de cualquier nodo del flujo).** El workflow principal tiene configurado como *Error Workflow* a «Manejo de errores RRHH» (Error Trigger → Edit Fields). Si un nodo falla, se dispara ese workflow con `aviso` y `detalle` (mensaje del error).
+   *Prueba realizada:* se cambió a propósito el nombre de la función de búsqueda por una inexistente (`match_documentos_x`) y se llamó al webhook de producción. La ejecución quedó en **Error** en el nodo Supabase Vector Store1 (`Could not find the function public.match_documentos_x`) y el workflow de errores se disparó solo y registró el detalle. Luego se restauró la configuración original.
+2. **El LLM devuelve una respuesta vacía, sin formato o inválida.** El nodo «Validar respuesta» intenta interpretar el JSON y comprueba que `accion` sea RESPONDER o DERIVAR y que `respuesta` no esté vacía. Si falla, marca `valido = false` y el If «¿Respuesta Válida?» manda el flujo a «Responder (respaldo)», que deriva a RRHH con un mensaje fijo, en lugar de enviar un texto roto. Este camino está implementado; no se forzó una respuesta inválida en las pruebas.
+
+**Control en el prompt:** el system prompt limita al agente a responder solo con el contexto, prohíbe aprobar trámites o prometer fechas y montos, y trata el mensaje del empleado como un dato, no como una instrucción (defensa básica contra inyección de prompts).
+
+**Mejoras propuestas (no implementadas):**
+
+- Que el workflow de errores también le avise al empleado o notifique a RRHH por correo o chat (hoy solo registra el error; quien llama al webhook recibe `Error in workflow`).
+- Un timeout y reintentos en la búsqueda vectorial y en el modelo.
+- Un chequeo de contexto vacío (hoy la búsqueda siempre devuelve los 3 fragmentos más parecidos; si la tabla estuviera vacía, el flujo no llegaría al agente).
+- Memoria persistente (ver arriba).
 
 ---
 
@@ -153,12 +181,37 @@ Respondé SOLO con un JSON válido, sin texto adicional:
 
 ## 7. Capturas
 
-- **Canvas del workflow:** `capturas/canvas.png` `[COMPLETAR]`
-- **Ingesta ejecutada con éxito:** `capturas/ingesta.png` `[COMPLETAR]`
-- **Tabla `documents` en Supabase (sin claves a la vista):** `capturas/supabase.png` `[COMPLETAR]`
-- **Ejecución exitosa, decisión RESPONDER:** `capturas/ejecucion-responder.png` `[COMPLETAR]`
-- **Ejecución exitosa, decisión DERIVAR:** `capturas/ejecucion-derivar.png` `[COMPLETAR]`
-- **Configuración del Session ID de la memoria:** `capturas/session-id.png` `[COMPLETAR]`
+Guardadas en la carpeta `capturas/`.
+
+### Workflow
+
+![Canvas del workflow: flujo de ingesta (9 fragmentos cargados) y flujo de consulta](capturas/canvas.png){width=6.3in}
+
+### Ejecución exitosa: decisión RESPONDER
+
+![Pregunta «¿Cuándo cobramos el sueldo?»: el agente responde y el Output muestra valido, accion, respuesta y to](capturas/ejecucion-responder.png){width=6.3in}
+
+![Ejecución en producción ID#56: Succeeded, con la respuesta del Agente RRHH](capturas/ejecucion-produccion.png){width=6.3in}
+
+![Respuesta recibida desde PowerShell llamando al webhook de producción](capturas/produccion-powershell.png){width=6.3in}
+
+### Ejecución exitosa: decisión DERIVAR (otro remitente, otra memoria)
+
+![Consulta por un adelanto de sueldo (remitente 5491100000006): el agente deriva a RRHH](capturas/ejecucion-derivar.png){width=6.3in}
+
+![Output del agente con el campo motivo](capturas/agente-derivar.png){width=6.3in}
+
+### Manejo de errores
+
+![Falla controlada: la ejecución ID#57 queda en Error en Supabase Vector Store1](capturas/error-vector-store.png){width=6.3in}
+
+![Respuesta del webhook de producción ante la falla](capturas/error-powershell.png){width=6.3in}
+
+![Workflow «Manejo de errores RRHH»: Error Trigger y Edit Fields](capturas/manejo-errores.png){width=6.3in}
+
+![El workflow de errores se disparó solo: Output de Edit Fields con aviso y detalle (ID#60)](capturas/error-workflow.png){width=6.3in}
+
+![Production Checklist de n8n con «Set up error notifications» tildado: el Error Workflow quedó vinculado](capturas/error-workflow-vinculado.png){width=6.3in}
 
 ---
 
@@ -167,19 +220,21 @@ Respondé SOLO con un JSON válido, sin texto adicional:
 ```
 /
 ├── README.md
-├── workflow-agente-rag-rrhh.json
+├── workflow-asistente-rrhh-rag.json
+├── workflow-manejo-errores-rrhh.json
 ├── guia-rrhh.pdf
 └── capturas/
 ```
 
-> El `.json` se exporta desde n8n (menú de tres puntos → Download). Antes de subirlo, revisar que no tenga claves escritas a mano en ningún nodo.
+> Los `.json` se exportan desde n8n (menú de tres puntos → Download). No contienen claves: las credenciales (Supabase, Ollama) quedan en n8n y el archivo solo guarda su nombre. `guia-rrhh.pdf` es una guía de ejemplo con datos ilustrativos, armada para probar el asistente.
 
 ## 9. Checklist de entrega
 
-- [ ] El repositorio contiene el `.json` exportado desde n8n
+- [ ] El repositorio contiene los `.json` exportados desde n8n
 - [ ] El README explica el caso de negocio, el ROI y la justificación de la automatización
 - [ ] El README justifica el modelo (local vs. nube) y la vector store usada
 - [ ] El README explica por qué se necesita un AI Agent con RAG
 - [ ] El System Prompt está completo y visible en el README
 - [ ] Hay capturas del canvas y de una ejecución funcional
 - [ ] El workflow tiene al menos dos disparadores, la vector store, un AI Agent y un camino de errores
+- [ ] El README documenta al menos dos puntos de falla
