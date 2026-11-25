@@ -1,0 +1,71 @@
+{
+  "name": "Manejo de errores RRHH",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "0a47542b-4bf5-4734-8119-1da41dd8757a",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "bceba6df-e28f-4641-8f8f-e1a31064a923",
+              "name": "aviso",
+              "value": "Falló el asistente RRHH",
+              "type": "string"
+            },
+            {
+              "id": "de65eb1c-93c9-4f84-bfe0-083e45b5004d",
+              "name": "detalle",
+              "value": "={{ $json.execution.error.message }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        224,
+        0
+      ],
+      "id": "ee9e2b64-94f8-4f37-b215-8ffd7abca091",
+      "name": "Edit Fields"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "a729db4c-fd00-4fa4-9576-22968edec400",
+  "meta": {
+    "instanceId": "0e769d5546fa049cfd3512cad1a8444bbbda313e599e495d66bea429b41652d6"
+  },
+  "nodeGroups": [],
+  "id": "MqDLg7yp0KJ1HLLb",
+  "tags": []
+}
